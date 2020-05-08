@@ -6,7 +6,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
-
 {-# options_ghc -Wno-incomplete-uni-patterns #-}
 
 module Language.Granule.Interpreter.Eval where
@@ -27,11 +26,14 @@ import Control.Monad (when, foldM)
 
 import qualified Control.Concurrent as C (forkIO)
 import qualified Control.Concurrent.Chan as CC (newChan, writeChan, readChan, Chan)
--- import Foreign.Marshal.Alloc (free, malloc)
--- import Foreign.Ptr (castPtr)
--- import Foreign.Storable (peek, poke)
 import System.IO (hFlush, stdout, stderr)
 import qualified System.IO as SIO
+
+-- Imports for pointers
+import qualified Foreign.Marshal.Alloc as PtrAlloc (malloc) -- free
+-- import qualified Foreign.Ptr as Ptr (castPtr)
+import qualified Foreign.Storable as PtrP (poke, Storable(..)) -- peek
+import GHC.Ptr
 
 type RValue = Value (Runtime ()) ()
 type RExpr = Expr (Runtime ()) ()
@@ -53,6 +55,16 @@ data Runtime a =
   -- | Delayed side effects wrapper
   | PureWrapper (IO (Expr (Runtime a) ()))
 
+  -- | Pointers
+  | Pointer (IO (Ptr (Value (Runtime a) a)))
+
+-- Problematic as this could container functions which are not really storable
+instance PtrP.Storable RValue where
+  sizeOf _ = 0
+  alignment _ = 0
+  peek = undefined
+  poke = undefined
+
 
 diamondConstr :: IO (Expr (Runtime ()) ()) -> RValue
 diamondConstr = Ext () . PureWrapper
@@ -68,6 +80,7 @@ instance Show (Runtime a) where
   show (PrimitiveClosure _) = "Some primitive closure"
   show (Handle _) = "Some handle"
   show (PureWrapper _) = "<suspended IO>"
+  show (Pointer _) = "<pointer>"
 
 instance Pretty (Runtime a) where
   pretty = show
@@ -332,11 +345,19 @@ builtIns =
   , (mkId "recv",    Ext () $ Primitive recv)
   , (mkId "send",    Ext () $ Primitive send)
   , (mkId "close",   Ext () $ Primitive close)
-  -- , (mkId "newPtr", malloc)
+  , (mkId "newPtr",  Ext () $ Primitive newPtr)
   -- , (mkId "swapPtr", peek poke castPtr) -- hmm probably don't need to cast the Ptr
   -- , (mkId "freePtr", free)
   ]
   where
+    newPtr :: RValue -> RValue
+    newPtr rval = Ext () $ Pointer $ do
+      -- Allocate a pointer
+      ptr <- PtrAlloc.malloc
+      -- Stick the runtime value in it and return
+      PtrP.poke ptr rval
+      return ptr
+
     fork :: (?globals :: Globals) => Ctxt RValue -> RValue -> RValue
     fork ctxt e@Abs{} = diamondConstr $ do
       c <- CC.newChan
